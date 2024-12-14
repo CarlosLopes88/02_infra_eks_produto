@@ -1,0 +1,159 @@
+name: Deploy para EKS - Microservices
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+jobs:
+  deploy-cliente:
+    runs-on: ubuntu-latest
+    outputs:
+      loadbalancer_endpoint: ${{ steps.get-endpoint.outputs.lb-endpoint }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.10.1
+
+      - name: Deploy Cliente
+        working-directory: ./cliente
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -var="db_username=${{ secrets.DOCDB_USERNAME }}" \
+            -var="db_password=${{ secrets.DOCDB_PASSWORD }}" \
+            -var="db_name=${{ secrets.DOCDB_DBNAME }}" \
+            -var="db_endpoint=${{ secrets.DOCDB_CLUSTER_ENDPOINT_CLI }}"
+          
+          echo "Waiting for EKS cluster..."
+          aws eks wait cluster-active --name eks-cliente --region ${{ secrets.AWS_REGION }}
+          
+          attempt=1
+          max_attempts=10
+          until kubectl rollout status deployment/microservice-cliente-deployment || [ $attempt -eq $max_attempts ]; do
+            echo "Attempt $attempt of $max_attempts..."
+            sleep 30
+            attempt=$((attempt + 1))
+          done
+
+      - name: Get LoadBalancer Endpoint
+        id: get-endpoint
+        working-directory: ./cliente
+        run: |
+          terraform output -raw microservice_cliente_loadbalancer_endpoint
+          {
+            echo "lb-endpoint<<EOF"
+            terraform output -raw microservice_cliente_loadbalancer_endpoint
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+          echo "Conteúdo do GITHUB_OUTPUT:"
+          cat $GITHUB_OUTPUT
+
+  deploy-produto:
+    runs-on: ubuntu-latest
+    needs: deploy-cliente
+    outputs:
+      loadbalancer_endpoint: ${{ steps.get-endpoint.outputs.lb-endpoint }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.10.1
+
+      - name: Deploy Produto
+        working-directory: ./produto
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -var="db_username=${{ secrets.DOCDB_USERNAME }}" \
+            -var="db_password=${{ secrets.DOCDB_PASSWORD }}" \
+            -var="db_name=${{ secrets.DOCDB_DBNAME }}" \
+            -var="db_endpoint=${{ secrets.DOCDB_CLUSTER_ENDPOINT_PRO }}"
+            
+          echo "Waiting for EKS cluster..."
+          aws eks wait cluster-active --name eks-produto --region ${{ secrets.AWS_REGION }}
+          
+          attempt=1
+          max_attempts=10
+          until kubectl rollout status deployment/microservice-produto-deployment || [ $attempt -eq $max_attempts ]; do
+            echo "Attempt $attempt of $max_attempts..."
+            sleep 30
+            attempt=$((attempt + 1))
+          done
+
+      - name: Get LoadBalancer Endpoint
+        id: get-endpoint
+        working-directory: ./produto
+        run: |
+          terraform output -raw microservice_produto_loadbalancer_endpoint
+          {
+            echo "lb-endpoint<<EOF"
+            terraform output -raw microservice_produto_loadbalancer_endpoint
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+          echo "Conteúdo do GITHUB_OUTPUT:"
+          cat $GITHUB_OUTPUT
+
+  deploy-pedidopgto:
+    runs-on: ubuntu-latest
+    needs: [deploy-cliente, deploy-produto]
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.10.1
+
+      - name: Deploy Pedido e Pagamento
+        working-directory: ./pedidopgto
+        run: |
+          echo "Using Cliente LB: ${{ needs.deploy-cliente.outputs.loadbalancer_endpoint }}"
+          echo "Using Produto LB: ${{ needs.deploy-produto.outputs.loadbalancer_endpoint }}"
+          
+          terraform init
+          terraform apply -auto-approve \
+            -var="cliente_endpoint=${{ needs.deploy-cliente.outputs.loadbalancer_endpoint }}" \
+            -var="produto_endpoint=${{ needs.deploy-produto.outputs.loadbalancer_endpoint }}" \
+            -var="db_username=${{ secrets.DOCDB_USERNAME }}" \
+            -var="db_password=${{ secrets.DOCDB_PASSWORD }}" \
+            -var="db_name=${{ secrets.DOCDB_DBNAME }}" \
+            -var="db_endpoint=${{ secrets.DOCDB_CLUSTER_ENDPOINT_PED }}" \
+            -var="pagseguro_token=${{ secrets.PAGSEGURO_TOKEN }}"
+            
+          echo "Waiting for EKS cluster..."
+          aws eks wait cluster-active --name eks-pedidopgto --region ${{ secrets.AWS_REGION }}
+          
+          attempt=1
+          max_attempts=10
+          until kubectl rollout status deployment/microservice-pedidopgto-deployment || [ $attempt -eq $max_attempts ]; do
+            echo "Attempt $attempt of $max_attempts..."
+            sleep 30
+            attempt=$((attempt + 1))
+          done
